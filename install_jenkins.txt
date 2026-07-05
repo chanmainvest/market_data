@@ -5,6 +5,16 @@ sudo apt update
 sudo apt upgrade
 sudo apt install python3-pip python3-venv openjdk-11-jre-headless jenkins
 
+# Install uv (Python package manager used by all scrapers)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# uv installs to ~/.local/bin ; ensure it is on PATH for the jenkins user:
+echo 'export PATH="$HOME/.local/bin:$PATH"' | sudo tee -a /etc/profile.d/uv.sh
+
+# Install the Playwright browser binary (headless Firefox) used by the
+# FINRA / eoddata / etf scrapers. Run as the jenkins user AFTER the first
+# `uv sync` so the venv exists, or pre-provision system-wide:
+uv run --no-project playwright install firefox
+
 # Set server time zone
 sudo timedatectl set-timezone America/Vancouver
 

@@ -15,25 +15,31 @@ def main():
 
     if args.input is None:
         filename = '../stock_data/raw_daily_finviz/finviz_' + str(datetime.date.today()) + '.csv'
+    else:
+        filename = args.input
 
     # generate report
     df = pd.read_csv(filename)
     df.set_index('Ticker', inplace=True)
     df.drop_duplicates(inplace=True)
+    # Ensure string-typed columns for the .find() string checks below.
+    df['Market Cap'] = df['Market Cap'].astype(str)
+    df['Change'] = df['Change'].astype(str)
     ts_list = []
     for sector in df.Sector.unique():
         ts = TestSuite(name=sector)
         df_sector = df[df['Sector'] == sector]
         for industry in df_sector.Industry.unique():
             for ticker in df.index[df['Industry'] == industry]:
-                if df.loc[ticker,'Market Cap'].find('B') > 0:
-                    print(sector, '-', industry, '-', ticker, '-', df.loc[ticker,'Change'])
+                market_cap = df.loc[ticker, 'Market Cap']
+                if 'B' in market_cap:
+                    print(sector, '-', industry, '-', ticker, '-', df.loc[ticker, 'Change'])
                     tc = TestCase(classname=industry,
                                   name=ticker,
-                                  elapsed_sec=df.loc[ticker,'Price'],
-                                  stdout=df.loc[ticker,'Change'],
-                                  stderr=df.loc[ticker,'Market Cap'])
-                    if df.loc[ticker,'Change'].find('-') >= 0:
+                                  elapsed_sec=df.loc[ticker, 'Price'],
+                                  stdout=df.loc[ticker, 'Change'],
+                                  stderr=market_cap)
+                    if '-' in df.loc[ticker, 'Change']:
                         tc.add_error_info(message='lower')
                     ts.test_cases.append(tc)
         ts_list.append(ts)

@@ -6,19 +6,19 @@ pipeline {
     stages {
         stage('build') {
             steps {
-                sh 'python3 -m venv --system-site-packages venv'
+                sh 'uv venv venv'
                 withPythonEnv("${WORKSPACE}/venv/") {
-                    sh 'pip3 install -r requirements.txt'
-                    //sh 'python3 scrap_finviz_screener.py' +
+                    sh 'uv sync'
+                    //sh 'uv run python scrap_finviz_screener.py' +
                     //   ' -filter "f=idx_dji" -output "data_tickers/dji.csv" -tab "v=111&" -no_report' +
                     //   ' -drop_col "Market Cap" -drop_col "P/E" -drop_col "Price" -drop_col "Change" -drop_col "Volume"'
-                    //sh 'python3 scrap_finviz_screener.py' +
+                    //sh 'uv run python scrap_finviz_screener.py' +
                     //   ' -filter "" -output "data_tickers/sp500.csv" -tab "v=111&" -no_report' +
                     //   ' -drop_col "Market Cap" -drop_col "P/E" -drop_col "Price" -drop_col "Change" -drop_col "Volume"'
-                    //sh 'python3 scrap_finviz_screener.py' +
+                    //sh 'uv run python scrap_finviz_screener.py' +
                     //   ' -filter "f=idx_sp500 "-output "data_tickers/all_tickers.csv" -tab "v=111&" -no_report' +
                     //   ' -drop_col "Market Cap" -drop_col "P/E" -drop_col "Price" -drop_col "Change" -drop_col "Volume"'
-                    //sh 'python3 scrap_etf_info.py'
+                    //sh 'uv run python scrap_etf_info.py'
                  }
             }
         }

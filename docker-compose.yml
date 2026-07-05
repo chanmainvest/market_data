@@ -1,0 +1,72 @@
+services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: mdata-db
+    restart: unless-stopped
+    shm_size: 2gb
+    command: ["postgres",
+              "-c", "timescaledb.max_background_workers=8",
+              "-c", "max_locks_per_transaction=1024",
+              "-c", "max_pred_locks_per_transaction=1024",
+              "-c", "max_pred_locks_per_page=512",
+              "-c", "shared_buffers=512MB",
+              "-c", "work_mem=64MB",
+              "-c", "maintenance_work_mem=512MB"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mdata}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mdata}
+      POSTGRES_DB: ${POSTGRES_DB:-mdata}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mdata} -d ${POSTGRES_DB:-mdata}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mdata
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mdata-backend
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-mdata}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mdata}
+      POSTGRES_DB: ${POSTGRES_DB:-mdata}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - mdata
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mdata-frontend
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    depends_on:
+      - backend
+    networks:
+      - mdata
+
+volumes:
+  pgdata:
+
+networks:
+  mdata:
+    driver: bridge

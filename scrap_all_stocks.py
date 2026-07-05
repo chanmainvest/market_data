@@ -2,11 +2,7 @@
 
 import pandas as pd
 import argparse
-import datetime
-import time
 import sys
-import glob
-import os
 from scrap_utils import *
 
 scrap_delay = 1
@@ -23,9 +19,10 @@ def main():
     parser.add_argument('-output', default='data_tickers/all_stocks.csv', type=str, help='output file')
     args = parser.parse_args()
 
-    args.input = '../stock_data/raw_daily_finviz/finviz_2020-10-02.csv'
-
     # read input file
+    if args.input is None:
+        print('ERROR: -input finviz daily file is required', file=sys.stderr)
+        return 1
     df_input = pd.read_csv(args.input)
 
     # read existing output file
@@ -45,9 +42,16 @@ def main():
     index_list = ['nasdaq100', 'sp500', 'dowjones']
     for index in index_list:
         df_index = get_index_components(index)
-        df.insert(len(df.columns),index,df_index['Weight'])
+        df.insert(len(df.columns), index, df_index['Weight'])
 
     df.to_csv(args.output)
+
+    # dual-write into Postgres (no-op unless MARKET_DATA_DB=1)
+    import db
+    out = df.reset_index()
+    out = out.rename(columns={'nasdaq100': 'w_nasdaq100', 'sp500': 'w_sp500', 'dowjones': 'w_dowjones'})
+    out['type'] = 'stock'
+    db.upsert_df(out, 'ref_ticker', conflict_cols=['ticker'])
 
 if __name__ == "__main__":
     status = main()

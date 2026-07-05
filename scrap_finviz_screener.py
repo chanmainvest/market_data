@@ -1,16 +1,14 @@
 #!/usr/bin/env python
 
-import requests
-import bs4
-import pandas as pd
 import argparse
 import datetime
-import time
 import sys
-from io import StringIO
-from finviz.screener import Screener
-from junit_xml import TestSuite, TestCase
-from scrap_utils import *
+import time
+
+import bs4
+import pandas as pd
+
+from scrap_utils import *  # noqa: F401,F403
 
 # -----------------------------------------------------------------
 # hand crafted scrapper
@@ -18,12 +16,21 @@ from scrap_utils import *
 finviz_url = 'https://finviz.com/screener.ashx?'
 scrap_delay = 1
 
-def get_stock_table(tab,filter,page):
+def get_stock_table(tab, filter, page):
     page_url = finviz_url + tab + filter + '&r=' + str((page - 1) * 20 + 1)
     print('getting page', page, 'url:', page_url)
-    page = get_url(page_url)
-    soup = bs4.BeautifulSoup(page, 'lxml')
-    stock_table = soup.find_all('table')[16]
+    html = get_url(page_url)
+    soup = bs4.BeautifulSoup(html, 'lxml')
+    # The screener results table has class "screener-table" in current finviz
+    # layout; fall back to the old positional index [16] if not found.
+    stock_table = soup.find('table', class_='screener-table')
+    if stock_table is None:
+        tables = soup.find_all('table')
+        if len(tables) <= 16:
+            raise RuntimeError(
+                f'finviz table layout changed: only {len(tables)} tables found on {page_url}'
+            )
+        stock_table = tables[16]
     return pd.read_html(str(stock_table), header=0, index_col=1)[0]
 
 def scrap_finviz(filter, tab_list = None):
@@ -85,14 +92,36 @@ def main():
             df_filters.append(scrap_finviz(filter, args.tab))
         df = pd.concat(df_filters)
     else:
-        # use the finviz package
-        stock_list = Screener(filters=args.filter)
-        df = pd.read_csv(StringIO(stock_list.to_csv()))
+        # use the modern finvizfinance package
+        from finvizfinance.screener.overview import Overview
+
+        screener = Overview()
+        filters_dict = {}
+        for f in args.filter:
+            # filters come in like "f=cap_microover"; strip the prefix
+            key = f[2:] if f.startswith('f=') else f
+            filters_dict.setdefault('filters', []).append(key)
+        screener.set_filter(filters=filters_dict.get('filters', []))
+        df = screener.screener_view()
 
     df = df.loc[~df.index.duplicated(), ~df.columns.duplicated()]
-    df.drop(columns=['No.']+args.drop_col, inplace=True)
+    df.drop(columns=['No.']+args.drop_col, inplace=True, errors='ignore')
     df.insert(0, 'Date', args.date, True)
     df.to_csv(filename)
+
+    # dual-write into Postgres (no-op unless MARKET_DATA_DB=1).
+    # finviz has ~70 site-native columns -> store as JSONB payload.
+    import db
+    indexed = {'Date', 'Ticker', 'Sector', 'Industry', 'Market Cap'}
+    rows = []
+    for _, r in df.iterrows():
+        rec = {c: r[c] for c in ['Date', 'Ticker', 'Sector', 'Industry', 'Market Cap'] if c in r.index}
+        for col in ['Date']:
+            if col in rec:
+                rec[col] = str(rec[col])
+        rows.append(rec)
+    payload_cols = [c for c in df.columns if c not in indexed]
+    db.upsert_jsonb_rows('raw_finviz_daily', ['date', 'ticker'], payload_cols, rows)
 
 if __name__ == "__main__":
     status = main()

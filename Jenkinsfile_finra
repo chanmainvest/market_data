@@ -18,9 +18,9 @@ pipeline {
         }
         stage('pip upgrade') {
             steps {
-                sh 'python3 -m venv --system-site-packages venv'
+                sh 'uv venv venv'
                 withPythonEnv("${WORKSPACE}/venv/") {
-                    sh 'pip3 install -r requirements.txt --upgrade'
+                    sh 'uv sync'
                 }
             }
         }
@@ -30,14 +30,14 @@ pipeline {
             }
             steps {
                 withPythonEnv("${WORKSPACE}/venv/") {
-                    sh 'python3 scrap_bonds_finra.py -today'
+                    sh 'uv run python scrap_bonds_finra.py -today'
                 }
             }
         }
         stage('scrap short') {
             steps {
                 withPythonEnv("${WORKSPACE}/venv/") {
-                    sh 'python3 scrap_short_finra.py'
+                    sh 'uv run python scrap_short_finra.py'
                 }
             }
         }

@@ -1,13 +1,10 @@
 #!/usr/bin/env python
 
-import pandas as pd
 import argparse
-import datetime
-import time
-import sys
-from fredapi import Fred
-from junit_xml import TestSuite, TestCase
 import csv
+import sys
+
+from fredapi import Fred
 
 def main():
     parser = argparse.ArgumentParser(description='scrap fred')
@@ -27,8 +24,19 @@ def main():
             try:
                 s = fred.get_series(row[0])
                 s.to_csv(filename)
-            except:
-                print('failed')
+
+                # dual-write into Postgres (no-op unless MARKET_DATA_DB=1)
+                import db
+                import pandas as pd
+                df_fred = s.reset_index()
+                df_fred.columns = ['date', 'value']
+                df_fred['series_id'] = row[0]
+                db.upsert_df(df_fred, 'raw_fred', conflict_cols=['series_id', 'date'])
+                # keep the series reference table fresh
+                db.upsert_df(pd.DataFrame([{'series_id': row[0], 'description': row[1]}]),
+                             'ref_fred_series', conflict_cols=['series_id'])
+            except Exception as exc:
+                print(f'failed: {exc}')
 
     return 0
 

@@ -21,10 +21,10 @@ pipeline {
                 EODDATA_CREDS = credentials('eoddata')
             }
             steps {
-                sh 'python3 -m venv --system-site-packages venv'
+                sh 'uv venv venv'
                 withPythonEnv("${WORKSPACE}/venv/") {
-                    sh 'pip3 install -r requirements.txt --upgrade'
-                    sh 'python3 scrap_eoddata.py -bin /usr/local/bin/phantomjs -username $EODDATA_CREDS_USR -password $EODDATA_CREDS_PSW'
+                    sh 'uv sync'
+                    sh 'uv run python scrap_eoddata.py -username $EODDATA_CREDS_USR -password $EODDATA_CREDS_PSW'
                 }
             }
         }

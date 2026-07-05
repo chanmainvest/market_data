@@ -1,16 +1,13 @@
 #!/usr/bin/env python
 
-import requests
-import bs4
-import pandas as pd
 import argparse
 import datetime
-import time
 import sys
-from io import StringIO
-from finviz.screener import Screener
-from junit_xml import TestSuite, TestCase
-from scrap_utils import *
+
+import bs4
+import pandas as pd
+
+from scrap_utils import *  # noqa: F401,F403
 
 # -----------------------------------------------------------------
 # hand crafted scrapper
@@ -65,7 +62,7 @@ def main():
         print('date:', d)
 
         # check is the market closed today
-        if is_market_close(args.date):
+        if is_market_close(d):
             print('The market is closed today')
             continue
 
@@ -75,6 +72,12 @@ def main():
             df.insert(0, 'Date', d, True)
             for index in df.index:
                 df.loc[[index]].to_csv('../stock_data/data_cpc/'+index+'.csv',header=False,index=False,mode='a')
+
+            # dual-write into Postgres (no-op unless MARKET_DATA_DB=1)
+            import db
+            df.index.name = 'category'
+            out = df.reset_index()
+            db.upsert_df(out, 'raw_cpc', conflict_cols=['category', 'date'])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,22 @@ scrap_utils.use_cloudscrapper = True
 eftfundflow_url = 'https://www.etf.com/etfanalytics/etf-fund-flows-tool'
 scrap_delay = 5
 
+
+def _upsert_etfcom_fundflow(df, date_str):
+    """Dual-write the etf.com fund-flow snapshot into Postgres (no-op
+    unless MARKET_DATA_DB=1). The wide per-period columns are bundled
+    into a JSONB ``flows`` payload keyed by (ticker, date)."""
+    if df is None or df.empty:
+        return
+    import db
+    rows = []
+    for idx, r in df.iterrows():
+        rec = {'date': str(date_str), 'ticker': str(idx)}
+        for c in df.columns:
+            rec[c] = r[c]
+        rows.append(rec)
+    db.upsert_jsonb_rows('raw_etfcom_fundflow', ['date', 'ticker'], list(df.columns), rows)
+
 def get_etf_fundflow_page(tickers,start_date,end_date):
     page_url = eftfundflow_url
     data = {'tickers' : tickers,
@@ -73,6 +89,10 @@ def main():
         df = get_etf_fundflow_all_tickers(tickers, args.start_date, args.end_date)
         df_to_csv(df, args.output_prefix, args.start_date, args.end_date)
 
+        # dual-write (no-op unless MARKET_DATA_DB=1)
+        import db
+        _upsert_etfcom_fundflow(df, args.start_date)
+
     else:
         tickers = df_etf_list[pd.to_datetime(df_etf_list['Inception']) < datetime.datetime(args.scrap_year+1,1,1)]['Ticker'].to_list()
         print('numbers of ETF:', len(tickers))
@@ -86,6 +106,8 @@ def main():
             print('date:', d)
             df = get_etf_fundflow_all_tickers(tickers, d, d)
             df_to_csv(df, args.output_prefix, d, d)
+            import db
+            _upsert_etfcom_fundflow(df, d)
 
 if __name__ == "__main__":
     status = main()

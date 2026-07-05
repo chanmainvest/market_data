@@ -5,7 +5,6 @@ import numpy as np
 import argparse
 import datetime
 import sys
-import time
 from scrap_utils import *
 import os
 import itertools
@@ -19,7 +18,7 @@ def main():
 
     source_list = {
         'Yahoo': 'raw_daily_yahoo/yahoo_',
-        'Eoddata': 'raw_daily_eoddata/eoddata_'
+        'Eoddata': 'raw_daily_eoddata/eoddata_',
         'Investing': 'raw_daily_investing_etf/investing_etf_',
     }
 
@@ -51,7 +50,12 @@ def main():
         df_etf['Eoddata'] = df_etf['Eoddata'][~df_etf['Eoddata'].index.duplicated(keep='last')]
 
     if 'Investing' in df_raw:
-        df_etf['Investing'] = df_raw['Investing']['Symbol','Prev. Close',]
+        # investing.com export columns we care about: Symbol + Prev. Close
+        invest_cols = [c for c in ['Symbol', 'Prev. Close'] if c in df_raw['Investing'].columns]
+        if invest_cols:
+            df_etf['Investing'] = df_raw['Investing'][invest_cols].copy()
+            if 'Symbol' in df_etf['Investing'].columns:
+                df_etf['Investing'].set_index('Symbol', inplace=True)
 
         if 'AlphaVantage' in df_raw:
             #df_raw['AlphaVantage'].drop(columns = ['adjusted_close'], inplace=True)
@@ -111,14 +115,17 @@ def main():
                 df_mode.loc[df_mode[1].notna(),0] = df_mode[df_mode[1].notna()].median(axis=1)
             df[('Data', field)] = df_mode[0]
 
-        # Output CSV files
-        df_out = df['Data'].copy()
-        df_ff = pd.read_csv('../stock_data/temp/' + ticker + '.csv', index_col=1, names=['File','Date','FundFlow'], parse_dates=True)
-        df_ff = df_ff[~df_ff.index.duplicated()]
-        df_out['FundFlow'] = df_ff.loc[set(df.index) & set(df_ff.index)]['FundFlow']
-
-        df_out['FundFlow'] = df_ff[:df.index[-1]]['FundFlow']
-        df_out.to_csv(args.output_dir + ticker + '.csv')
+        # Output CSV files — write one daily snapshot per ETF.
+        os.makedirs(args.output_dir, exist_ok=True)
+        for ticker in df.index:
+            df_out = df.loc[[ticker], 'Data'].copy()
+            fundflow_path = '../stock_data/temp/' + ticker + '.csv'
+            if os.path.exists(fundflow_path):
+                df_ff = pd.read_csv(fundflow_path, index_col=1,
+                                    names=['File', 'Date', 'FundFlow'], parse_dates=True)
+                df_ff = df_ff[~df_ff.index.duplicated()]
+                df_out['FundFlow'] = df_ff['FundFlow'].reindex(df_out.index).iloc[:, 0] if df_out.shape[1] else None
+            df_out.to_csv(args.output_dir + ticker + '.csv')
 
 if __name__ == "__main__":
     status = main()

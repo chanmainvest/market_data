@@ -52,6 +52,17 @@ def main():
     df = pd.concat(df_pages)
     df.to_csv(filename)
 
+    # dual-write into Postgres (no-op unless MARKET_DATA_DB=1)
+    import db
+    rows = []
+    bond_id_col = df.index.name or 'bond_id'
+    for idx, r in df.iterrows():
+        rec = {'date': args.date, 'bond_id': str(idx)}
+        for c in df.columns:
+            rec[c] = r[c]
+        rows.append(rec)
+    db.upsert_jsonb_rows('raw_bonds_bi', ['date', 'bond_id'], list(df.columns), rows)
+
 if __name__ == "__main__":
     status = main()
     sys.exit(0 if status is None else status)

@@ -18,10 +18,10 @@ pipeline {
         }
         stage('scrap') {
             steps {
-                sh 'python3 -m venv --system-site-packages venv'
+                sh 'uv venv venv'
                 withPythonEnv("${WORKSPACE}/venv/") {
-                    sh 'pip3 install -r requirements.txt --upgrade'
-                    sh 'python3 scrap_bonds_bi.py'
+                    sh 'uv sync'
+                    sh 'uv run python scrap_bonds_bi.py'
                 }
             }
         }

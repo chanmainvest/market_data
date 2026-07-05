@@ -1,20 +1,19 @@
 #!/usr/bin/env python
+"""Scrape ETF info and lists from etfdb.com and etf.com.
 
+Rewritten to use Playwright (Selenium/PhantomJS are discontinued).
+"""
+
+import argparse
+import datetime
 import sys
 import time
-import argparse
-import pandas as pd
-import selenium
-from selenium.webdriver.firefox.options import Options as FirefoxOptions
-from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import requests
+
 import bs4
+import pandas as pd
+
 import scrap_utils
-from scrap_utils import *
+from scrap_utils import *  # noqa: F401,F403
 
 # -----------------------------------------------------------------
 # hand crafted scrapper
@@ -22,87 +21,109 @@ from scrap_utils import *
 etfdb_url = 'https://etfdb.com/etf/'
 etfcom_url = 'https://www.etf.com/'
 
+
 def etfcom_click_understand_button():
+    page = get_driver()
     try:
-        understand_button = get_driver().find_element_by_link_text('I Understand')
-        understand_button.click()
-    except selenium.common.exceptions.NoSuchElementException:
+        page.get_by_text('I Understand', exact=True).first.click(timeout=3000)
+    except Exception:
         pass
 
-def get_etfcom_info(ticker, output_etfcom_holdings = None):
+
+def get_etfcom_info(ticker, output_etfcom_holdings=None):
     page_url = etfcom_url + ticker
-    get_driver().get(page_url)
+    page = get_driver()
+    page.goto(page_url)
     etfcom_click_understand_button()
     try:
-        viewall = get_driver().find_element_by_class_name('viewAll')
-        get_driver().maximize_window()
-        viewall.click()
+        viewall = page.locator('.viewAll').first
+        page.set_viewport_size({'width': 1280, 'height': 1024})
+        viewall.click(timeout=3000)
         time.sleep(0.5)
-    except:
+    except Exception:
         pass
-    page = get_driver().page_source
-    soup = bs4.BeautifulSoup(page, 'lxml')
-    row_dict = {}
-    row_dict['Ticker'] = ticker
+    html = page.content()
+    soup = bs4.BeautifulSoup(html, 'lxml')
+    row_dict = {'Ticker': ticker}
     h1 = soup.find('h1')
     if h1 is None:
         return row_dict
-    row_dict['Description'] = h1.find_next('span').text
-    for id in ['fundSummaryData','fundPortfolioData','fundIndexData']:
-        id_tag = soup.find(id=id)
+    next_span = h1.find_next('span')
+    row_dict['Description'] = next_span.text if next_span else ''
+    for id_ in ['fundSummaryData', 'fundPortfolioData', 'fundIndexData']:
+        id_tag = soup.find(id=id_)
         if id_tag is None:
             continue
-        div_list = id_tag.find_all('div', class_='rowText')
-        for div in div_list:
+        for div in id_tag.find_all('div', class_='rowText'):
             label = div.find('label')
-            if label is not None:
-                row_dict[label.text.replace('\n','')] = label.find_next_sibling().text.replace('\n','')
-    if bool(output_etfcom_holdings):
+            if label is not None and label.find_next_sibling() is not None:
+                row_dict[label.text.replace('\n', '')] = label.find_next_sibling().text.replace('\n', '')
+    if output_etfcom_holdings:
         cbox = soup.find(id='cboxOverlay')
-        holdings_table = cbox.find_next('table')
-        if bool(holdings_table):
-            df_holdings = pd.read_html(str(holdings_table))[0]
-            df_holdings.columns = ['Name','Allocation']
-            df_holdings.to_csv(output_etfcom_holdings + ticker + '.csv')
+        if cbox is not None:
+            holdings_table = cbox.find_next('table')
+            if holdings_table is not None:
+                df_holdings = pd.read_html(str(holdings_table))[0]
+                df_holdings.columns = ['Name', 'Allocation']
+                df_holdings.to_csv(output_etfcom_holdings + ticker + '.csv')
+                # dual-write (no-op unless MARKET_DATA_DB=1)
+                import datetime as _dt
+                import db
+                out = df_holdings.rename(columns={'Name': 'name', 'Allocation': 'allocation'})
+                out['ticker'] = ticker
+                out['date'] = str(_dt.date.today())
+                db.upsert_df(out, 'raw_etf_holdings', conflict_cols=['ticker', 'date', 'name'])
     return row_dict
 
-def get_etfdb_info(ticker, output_etfdb_fundflow = None):
+
+def get_etfdb_info(ticker, output_etfdb_fundflow=None):
     page_url = etfdb_url + ticker
-    get_driver().get(page_url)
-    page = get_driver().page_source
-    soup = bs4.BeautifulSoup(page, 'lxml')
-    row_dict = {}
-    row_dict['Ticker'] = ticker
-    h1 = soup.find_all('h1')
-    if h1 is None:
+    page = get_driver()
+    page.goto(page_url)
+    html = page.content()
+    soup = bs4.BeautifulSoup(html, 'lxml')
+    row_dict = {'Ticker': ticker}
+    h1_list = soup.find_all('h1')
+    if not h1_list:
         return None
-    div_description = h1[0].find_next('div')
-    if div_description is None:
+    div_description = h1_list[0].find_next('div')
+    if div_description is None or div_description.next_sibling is None:
         return None
-    row_dict['Description'] = div_description.next_sibling.replace('\n','')
+    row_dict['Description'] = str(div_description.next_sibling).replace('\n', '')
     ul_list = soup.find_all('ul', class_='list-unstyled')
-    for i in range(4):
+    for i in range(min(4, len(ul_list))):
         for li in ul_list[i].find_all('li'):
             span_list = li.find_all('span')
-            row_dict[span_list[0].text] = span_list[1].text.replace('\n','')
+            if len(span_list) >= 2:
+                row_dict[span_list[0].text] = span_list[1].text.replace('\n', '')
 
-    # extract fund flow history
-    if bool(output_etfdb_fundflow):
-        fundflow_data = soup.find(id = 'fund-flow-chart-container').attrs['data-series'].replace('[[','').replace(']]','')
-        fundflow_history = []
-        for fundflow_row in fundflow_data.split('], ['):
-            tokens = fundflow_row.split(',')
-            fundflow_history.append([datetime.datetime.fromtimestamp(int(tokens[0])/1000).date(),tokens[1]])
-        df_fundflow = pd.DataFrame(fundflow_history, columns=['Date','Fundflow'])
-        df_fundflow.set_index('Date',inplace=True)
-        df_fundflow.to_csv(output_etfdb_fundflow + ticker + '.csv')
+    if output_etfdb_fundflow:
+        container = soup.find(id='fund-flow-chart-container')
+        if container is not None and container.has_attr('data-series'):
+            fundflow_data = container['data-series'].replace('[[', '').replace(']]', '')
+            fundflow_history = []
+            for fundflow_row in fundflow_data.split('], ['):
+                tokens = fundflow_row.split(',')
+                if len(tokens) >= 2:
+                    fundflow_history.append(
+                        [datetime.datetime.fromtimestamp(int(tokens[0]) / 1000).date(), tokens[1]]
+                    )
+            df_fundflow = pd.DataFrame(fundflow_history, columns=['Date', 'Fundflow'])
+            df_fundflow.set_index('Date', inplace=True)
+            df_fundflow.to_csv(output_etfdb_fundflow + ticker + '.csv')
+            # dual-write (no-op unless MARKET_DATA_DB=1)
+            import db
+            out = df_fundflow.reset_index().rename(columns={'Fundflow': 'fundflow'})
+            out['ticker'] = ticker
+            db.upsert_df(out, 'raw_etfdb_fundflow', conflict_cols=['ticker', 'date'])
 
     return row_dict
+
 
 def main():
     parser = argparse.ArgumentParser(description='scrap all etf')
-    parser.add_argument('-use_firefox', action='store_true', help='Use firefox instead of phantomjs')
-    parser.add_argument('-use_headless', action='store_true', help='Use headless mode in Firefox')
+    parser.add_argument('-use_firefox', action='store_true', help='Use firefox browser')
+    parser.add_argument('-use_headless', action='store_true', help='Run browser headless')
     parser.add_argument('-delay', type=int, default=2, help='delay in sec between each URL request')
     parser.add_argument('-no_scrap_etf_list', action='store_true', help='no scrap etf list from etf.com and etfdb')
     parser.add_argument('-no_scrap_etfdb_info', action='store_true', help='no scrap etf info from etfdb')
@@ -118,66 +139,91 @@ def main():
     args = parser.parse_args()
 
     scrap_utils.use_firefox = args.use_firefox
-    scrap_utils.use_firefox_headless = args.use_headless
+    scrap_utils.use_firefox_headless = args.use_headless or True
 
     if not args.no_scrap_etf_list:
-        driver = get_driver()
-        driver_wait = WebDriverWait(get_driver(), 10)
+        page = get_driver()
 
-        # scrap ETF list from etf.com
+        # scrape ETF list from etf.com
         df_pages = []
-        driver.get('https://www.etf.com/etfanalytics/etf-finder')
+        page.goto('https://www.etf.com/etfanalytics/etf-finder')
         etfcom_click_understand_button()
         time.sleep(5)
-        driver_wait.until(EC.presence_of_all_elements_located((By.ID, 'inactiveResult')))
-        driver_wait.until(EC.element_to_be_clickable((By.ID, 'inactiveResult')))
-        button_100 = driver.find_elements_by_id('inactiveResult')[-1]
-        button_100.location_once_scrolled_into_view
-        driver_wait.until(EC.visibility_of(button_100))
-        time.sleep(5)
-        button_100.click()
-        time.sleep(1)
-        while True:
-            print('scrap etf.com page', driver.find_element_by_id('goToPage').get_attribute('value'))
-            driver.find_element_by_id('finderTable')
-            df_pages.append(pd.read_html(driver.find_element_by_id('finderTable').get_attribute('outerHTML'), header=0, index_col=0)[0])
-            if len(driver.find_elements_by_class_name('nextPageInactive')) > 0:
-                break
-            button_nextpage = driver.find_element_by_id('nextPage')
-            button_nextpage.location_once_scrolled_into_view
-            driver_wait.until(EC.visibility_of(button_nextpage))
-            button_nextpage.click()
-            time.sleep(args.delay)
-        df_etfcom = pd.concat(df_pages)
-        df_etfcom.to_csv(args.output_etfcom)
+        # click the "show 100 per page" control (last #inactiveResult)
+        try:
+            page.wait_for_selector('#inactiveResult', timeout=10000)
+            page.locator('#inactiveResult').last.scroll_into_view_if_needed()
+            page.locator('#inactiveResult').last.click()
+            time.sleep(5)
+        except Exception as exc:
+            print(f'could not expand etf.com results: {exc}')
 
-        # Scrap ETF list from etfdb
+        while True:
+            try:
+                current = page.locator('#goToPage').first.input_value()
+            except Exception:
+                current = '?'
+            print('scrap etf.com page', current)
+            try:
+                table_html = page.locator('#finderTable').first.evaluate('el => el.outerHTML')
+                df_pages.append(pd.read_html(table_html, header=0, index_col=0)[0])
+            except Exception as exc:
+                print(f'failed to read etf.com table: {exc}')
+            if page.locator('.nextPageInactive').count() > 0:
+                break
+            try:
+                page.locator('#nextPage').first.scroll_into_view_if_needed()
+                page.locator('#nextPage').first.click()
+            except Exception:
+                break
+            time.sleep(args.delay)
+        if df_pages:
+            df_etfcom = pd.concat(df_pages)
+            df_etfcom.to_csv(args.output_etfcom)
+        else:
+            df_etfcom = pd.DataFrame()
+
+        # scrape ETF list from etfdb
         df_pages = []
-        driver.get('https://etfdb.com/screener')
+        page.goto('https://etfdb.com/screener')
         while True:
-            print('scrap etfdb page', driver.find_element_by_css_selector("li[class='active page-number']").text)
-            thead = driver.find_element_by_tag_name('thead')
-            tbody = driver.find_element_by_tag_name('tbody')
-            table = '<table>' + thead.get_attribute('outerHTML') + tbody.get_attribute('outerHTML') + '</table>'
-            df_pages.append(pd.read_html(table, header=0, index_col=0)[0])
-            df_pages[-1].drop(columns=['ETFdb Pro'], inplace=True)
-            df_pages[-1].rename(index={'Symbol': 'Ticker'}, inplace=True)
-            if driver.find_element_by_class_name('page-next').get_attribute('class').split()[0] == 'disabled':
+            try:
+                active = page.locator("li[class='active page-number']").first.inner_text()
+            except Exception:
+                active = '?'
+            print('scrap etfdb page', active)
+            try:
+                thead = page.locator('thead').first.evaluate('el => el.outerHTML')
+                tbody = page.locator('tbody').first.evaluate('el => el.outerHTML')
+                table = '<table>' + thead + tbody + '</table>'
+                df_pages.append(pd.read_html(table, header=0, index_col=0)[0])
+            except Exception as exc:
+                print(f'failed to read etfdb table: {exc}')
                 break
-            driver.find_element_by_class_name('page-next').find_element_by_tag_name('a').click()
+            try:
+                classes = page.locator('.page-next').first.get_attribute('class') or ''
+                if 'disabled' in classes.split():
+                    break
+                page.locator('.page-next a').first.click()
+            except Exception:
+                break
             time.sleep(args.delay)
-        df_etfdb = pd.concat(df_pages)
-        df_etfdb.to_csv(args.output_etfdb)
+        if df_pages:
+            df_etfdb = pd.concat(df_pages)
+            for dfp in df_pages:
+                dfp.drop(columns=['ETFdb Pro'], inplace=True, errors='ignore')
+            df_etfdb.to_csv(args.output_etfdb)
+        else:
+            df_etfdb = pd.DataFrame()
 
-        etfcom_list = set(df_etfcom.index.to_list())
-        etfdb_list = set(df_etfdb.index.to_list())
+        etfcom_list = set(df_etfcom.index.to_list()) if not df_etfcom.empty else set()
+        etfdb_list = set(df_etfdb.index.to_list()) if not df_etfdb.empty else set()
         all_etf_list = etfcom_list | etfdb_list
         df_all = pd.DataFrame(index=sorted(all_etf_list))
         df_all.index.name = 'Ticker'
         df_all['etfcom'] = df_all.index.isin(etfcom_list)
         df_all['etfdb'] = df_all.index.isin(etfdb_list)
         df_all.to_csv(args.output_all_etfs)
-
     else:
         df_all = pd.read_csv(args.output_all_etfs)
         df_all.set_index('Ticker', inplace=True)
@@ -185,44 +231,63 @@ def main():
     # Scrap etfdb info
     if not args.no_scrap_etfdb_info:
         etfdb_row_dict_list = []
-        for count,ticker in enumerate(df_all.index):
-            if args.skip is not None:
-                if count < args.skip:
-                    continue
-            if df_all.loc[ticker,'etfdb']:
-                print('get_etfdb_info',count,ticker)
+        for count, ticker in enumerate(df_all.index):
+            if args.skip is not None and count < args.skip:
+                continue
+            if df_all.loc[ticker, 'etfdb']:
+                print('get_etfdb_info', count, ticker)
                 try:
                     row_dict = get_etfdb_info(ticker, args.output_etfdb_fundflow)
-                except:
-                    print('scrap fail - try again')
+                except Exception as exc:
+                    print(f'scrap fail ({exc}) - try again')
                     time.sleep(30)
                     row_dict = get_etfdb_info(ticker, args.output_etfdb_fundflow)
                 if row_dict is not None:
                     etfdb_row_dict_list.append(row_dict)
                     row_dict_to_csv(etfdb_row_dict_list, args.output_etfdb_info)
+                    # dual-write ref table (no-op unless MARKET_DATA_DB=1)
+                    import json as _json
+                    import db
+                    rec = dict(row_dict)
+                    desc = rec.pop('Description', None)
+                    db.upsert_df(
+                        pd.DataFrame([{'ticker': ticker, 'description': desc,
+                                       'info': _json.dumps(rec, default=str)}]),
+                        'ref_etfdb_info', conflict_cols=['ticker'],
+                    )
                 time.sleep(args.delay)
 
     # Scrap etfcom info
     if not args.no_scrap_etfcom_info:
         etfcom_row_dict_list = []
         for count, ticker in enumerate(df_all.index):
-            if args.skip is not None:
-                if count < args.skip:
-                    continue
+            if args.skip is not None and count < args.skip:
+                continue
             if df_all.loc[ticker, 'etfcom']:
-                print('get_etfcom_info',count,ticker)
+                print('get_etfcom_info', count, ticker)
                 try:
                     row_dict = get_etfcom_info(ticker, args.output_etfcom_holdings)
-                except:
-                    print('scrap fail - try again')
+                except Exception as exc:
+                    print(f'scrap fail ({exc}) - try again')
                     time.sleep(30)
                     row_dict = get_etfcom_info(ticker, args.output_etfcom_holdings)
                 if row_dict is not None:
                     etfcom_row_dict_list.append(row_dict)
                     row_dict_to_csv(etfcom_row_dict_list, args.output_etfcom_info)
+                    # dual-write ref table (no-op unless MARKET_DATA_DB=1)
+                    import json as _json
+                    import db
+                    rec = dict(row_dict)
+                    desc = rec.pop('Description', None)
+                    db.upsert_df(
+                        pd.DataFrame([{'ticker': ticker, 'description': desc,
+                                       'info': _json.dumps(rec, default=str)}]),
+                        'ref_etfcom_info', conflict_cols=['ticker'],
+                    )
                 time.sleep(args.delay)
 
-    get_driver().quit()
+    close_driver()
+
 
 if __name__ == "__main__":
     status = main()

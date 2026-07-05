@@ -1,26 +1,24 @@
 #!/usr/bin/env python
 
-import pandas as pd
 import argparse
-import datetime
-import sys
-import yfinance as yf
 import glob
 import os
+import sys
 import time
+
+import pandas as pd
+import yfinance as yf
 
 scrap_delay = 2
 
+
 def main():
-    parser = argparse.ArgumentParser(description='scrap yahoo earning')
+    parser = argparse.ArgumentParser(description='scrap yahoo history')
     parser.add_argument('-input_dir', type=str, help='input directory, use the latest file')
     parser.add_argument('-input_file', type=str, default='data_tickers/yahoo_indexes.csv', help='input file')
     parser.add_argument('-output_dir', type=str, default='../stock_data/raw_history_yahoo/', help='output directory')
     parser.add_argument('-skip', type=int, help='skip tickers')
     args = parser.parse_args()
-
-    args.input_file = 'data_tickers/all_stocks.csv'
-    args.output_dir = '../stock_data_local/raw_history_yahoo_stock/'
 
     if args.input_dir is not None:
         list_of_files = glob.glob(args.input_dir + '/*')
@@ -32,38 +30,73 @@ def main():
     df_input.set_index('Ticker', inplace=True)
     ticker_list = df_input.index
 
-    for count,ticker in enumerate(ticker_list):
-        if args.skip is not None:
-            if count < args.skip:
-                continue
+    for count, ticker in enumerate(ticker_list):
+        if args.skip is not None and count < args.skip:
+            continue
         print('downloading...' + ticker, '-', count)
+
         try:
-            data = yf.download(ticker, period='max', auto_adjust=False, prepost=False)
-        except:
-            print('download failed, retry')
+            data = yf.download(
+                ticker,
+                period='max',
+                auto_adjust=False,
+                prepost=False,
+                repair=True,
+                threads=True,
+            )
+        except Exception as exc:
+            print(f'download failed ({exc}), retry after backoff')
             time.sleep(30)
-            data = yf.download(ticker, period='max', auto_adjust=False, prepost=False)
+            data = yf.download(
+                ticker,
+                period='max',
+                auto_adjust=False,
+                prepost=False,
+                repair=True,
+                threads=True,
+            )
+
+        # Modern yfinance returns MultiIndex columns even for a single
+        # ticker (e.g. ('Close', 'AAPL')). Flatten to plain column names so
+        # the saved CSV stays clean and assignment of Dividend/Split works
+        # against the OHLC index.
+        if isinstance(data.columns, pd.MultiIndex):
+            # Keep the price level; drop the (now-redundant) ticker level.
+            data.columns = data.columns.get_level_values(0)
 
         try:
             yf_ticker = yf.Ticker(ticker)
-        except:
-            print('ticker get failed, retry')
+        except Exception as exc:
+            print(f'Ticker get failed ({exc}), retry after backoff')
             time.sleep(30)
             yf_ticker = yf.Ticker(ticker)
 
         try:
             dividends = yf_ticker.dividends
             splits = yf_ticker.splits
-            if dividends is not None:
-                data['Dividend'] = dividends
-            if splits is not None:
-                data['Split'] = splits
-        except:
-            print('dividend or split download failed')
+            # modern yfinance: dividends/splits are Series indexed by date,
+            # or None/empty when none exist. Align into the OHLC frame.
+            if dividends is not None and not dividends.empty:
+                data['Dividend'] = dividends.reindex(data.index).fillna(0.0)
+            if splits is not None and not splits.empty:
+                data['Split'] = splits.reindex(data.index).fillna(0.0)
+        except Exception as exc:
+            print(f'dividend or split download failed: {exc}')
 
         data.to_csv(args.output_dir + ticker + '.csv')
 
+        # dual-write into Postgres (no-op unless MARKET_DATA_DB=1)
+        import db
+        out = data.reset_index().rename(columns={
+            'Adj Close': 'adj_close',
+            'Dividend': 'dividend',
+            'Split': 'split_ratio',
+        })
+        out['ticker'] = ticker
+        db.upsert_df(out, 'raw_yahoo_history', conflict_cols=['ticker', 'date'])
+
         time.sleep(scrap_delay)
+
 
 if __name__ == "__main__":
     status = main()

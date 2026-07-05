@@ -6,8 +6,6 @@ import argparse
 import datetime
 import time
 import sys
-import glob
-import os
 from scrap_utils import *
 
 scrap_delay = 1
@@ -67,28 +65,42 @@ def main():
         }
     }
 
+    def _safe_get(prop, tk, key):
+        """Return prop[tk][key] or None. yahooquery properties can be a dict
+        keyed by symbol, a dict of {symbol: error_string}, or None."""
+        if not isinstance(prop, dict):
+            return None
+        entry = prop.get(tk)
+        if not isinstance(entry, dict):
+            return None
+        return entry.get(key)
+
     ticker_dict_list = []
     print('number of tickers:', len(ticker_list))
-    for count,ticker in enumerate(ticker_list):
+    for count, ticker in enumerate(ticker_list):
         print('downloading...', ticker, '-', count)
         try:
             yticker = yq.Ticker(ticker)
-            ticker_dict = {}
-            for module,module_dict in columns.items():
+            ticker_dict = {'Ticker': ticker}
+            for module, module_dict in columns.items():
+                ymodule = getattr(yticker, module, None)
                 for ycol, col in module_dict.items():
-                    ymodule = getattr(yticker,module)
-                    ticker_dict['Ticker'] = ticker
-                    if ycol in ymodule[ticker]:
-                        ticker_dict[col] = ymodule[ticker][ycol]
+                    value = _safe_get(ymodule, ticker, ycol)
+                    if value is not None:
+                        ticker_dict[col] = value
             ticker_dict_list.append(ticker_dict)
-        except:
-            print('Error, skip')
+        except Exception as exc:
+            print(f'Error, skip {ticker}: {exc}')
 
         time.sleep(scrap_delay)
 
     df = pd.DataFrame(ticker_dict_list)
     df['Date'] = args.date
     df.to_csv(filename)
+
+    # dual-write into Postgres (no-op unless MARKET_DATA_DB=1)
+    import db
+    db.upsert_df(df, 'raw_yahoo_daily', conflict_cols=['ticker', 'date'])
 
 if __name__ == "__main__":
     status = main()
