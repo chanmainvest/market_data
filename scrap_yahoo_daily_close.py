@@ -75,24 +75,32 @@ def main():
             return None
         return entry.get(key)
 
-    ticker_dict_list = []
-    print('number of tickers:', len(ticker_list))
-    for count, ticker in enumerate(ticker_list):
-        print('downloading...', ticker, '-', count)
-        try:
-            yticker = yq.Ticker(ticker)
-            ticker_dict = {'Ticker': ticker}
-            for module, module_dict in columns.items():
-                ymodule = getattr(yticker, module, None)
-                for ycol, col in module_dict.items():
-                    value = _safe_get(ymodule, ticker, ycol)
-                    if value is not None:
-                        ticker_dict[col] = value
-            ticker_dict_list.append(ticker_dict)
-        except Exception as exc:
-            print(f'Error, skip {ticker}: {exc}')
+    # Start the rotating SOCKS5 proxy pool if YAHOO_PROXY_HOSTS is set.
+    # Each yq.Ticker construction will pick up the next egress IP via
+    # next_proxy(), distributing requests to avoid Yahoo's per-IP 429s.
+    init_proxy_pool()
+    try:
+        ticker_dict_list = []
+        print('number of tickers:', len(ticker_list))
+        for count, ticker in enumerate(ticker_list):
+            print('downloading...', ticker, '-', count)
+            try:
+                proxy = next_proxy()
+                yticker = yq.Ticker(ticker, proxy=proxy) if proxy else yq.Ticker(ticker)
+                ticker_dict = {'Ticker': ticker}
+                for module, module_dict in columns.items():
+                    ymodule = getattr(yticker, module, None)
+                    for ycol, col in module_dict.items():
+                        value = _safe_get(ymodule, ticker, ycol)
+                        if value is not None:
+                            ticker_dict[col] = value
+                ticker_dict_list.append(ticker_dict)
+            except Exception as exc:
+                print(f'Error, skip {ticker}: {exc}')
 
-        time.sleep(scrap_delay)
+            time.sleep(scrap_delay)
+    finally:
+        stop_proxy_pool()
 
     df = pd.DataFrame(ticker_dict_list)
     df['Date'] = args.date

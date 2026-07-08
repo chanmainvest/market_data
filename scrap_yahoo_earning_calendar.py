@@ -7,6 +7,7 @@ import time
 
 import pandas as pd
 import yfinance as yf
+from scrap_utils import init_proxy_pool, next_proxy, stop_proxy_pool
 
 scrap_delay = 2
 
@@ -75,35 +76,41 @@ def main():
     df_input.set_index('Ticker', inplace=True)
     df_output = pd.DataFrame()
 
-    for ticker in df_input.index:
-        print(ticker)
-        yf_ticker = yf.Ticker(ticker)
-        try:
-            yf_calendar = yf_ticker.calendar
-        except Exception:
-            print(f"{ticker} has no earnings date yet")
+    # Start the rotating SOCKS5 proxy pool if YAHOO_PROXY_HOSTS is set.
+    init_proxy_pool()
+    try:
+        for ticker in df_input.index:
+            print(ticker)
+            proxy = next_proxy()
+            yf_ticker = yf.Ticker(ticker, proxy=proxy) if proxy else yf.Ticker(ticker)
+            try:
+                yf_calendar = yf_ticker.calendar
+            except Exception:
+                print(f"{ticker} has no earnings date yet")
+                time.sleep(scrap_delay)
+                continue
+
+            next_earnings_date = _extract_earnings_date(yf_calendar)
+            if next_earnings_date is None:
+                time.sleep(scrap_delay)
+                continue
+
+            print(f"{ticker} next earnings at {next_earnings_date}")
+            if next_monday <= next_earnings_date <= next_friday:
+                # Build a single-row frame from the dict (or DataFrame transpose).
+                if isinstance(yf_calendar, dict):
+                    new_row = pd.DataFrame([yf_calendar])
+                else:
+                    new_row = yf_calendar.T
+                new_row.insert(1, 'Ticker', ticker)
+                report = df_input.at[ticker, 'Report']
+                new_row.insert(2, 'Report', report)
+                # pandas 2.0 removed DataFrame.append; use concat.
+                df_output = pd.concat([df_output, new_row], ignore_index=True)
+
             time.sleep(scrap_delay)
-            continue
-
-        next_earnings_date = _extract_earnings_date(yf_calendar)
-        if next_earnings_date is None:
-            time.sleep(scrap_delay)
-            continue
-
-        print(f"{ticker} next earnings at {next_earnings_date}")
-        if next_monday <= next_earnings_date <= next_friday:
-            # Build a single-row frame from the dict (or DataFrame transpose).
-            if isinstance(yf_calendar, dict):
-                new_row = pd.DataFrame([yf_calendar])
-            else:
-                new_row = yf_calendar.T
-            new_row.insert(1, 'Ticker', ticker)
-            report = df_input.at[ticker, 'Report']
-            new_row.insert(2, 'Report', report)
-            # pandas 2.0 removed DataFrame.append; use concat.
-            df_output = pd.concat([df_output, new_row], ignore_index=True)
-
-        time.sleep(scrap_delay)
+    finally:
+        stop_proxy_pool()
 
     df_output.reset_index(drop=True, inplace=True)
     if 'Earnings Date' in df_output.columns:

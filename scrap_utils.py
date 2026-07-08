@@ -4,9 +4,19 @@
 HTTP helpers use ``requests`` (optionally ``cloudscraper`` to bypass
 Cloudflare). Browser automation uses **Playwright** (replacing the legacy
 Selenium/PhantomJS stack, both of which are discontinued).
+
+Yahoo Finance calls can be distributed across multiple egress IPs via a
+round-robin SOCKS5 proxy pool (``ProxyPool``) built on ``ssh -D`` tunnels,
+mirroring the knowledge_base YouTube scraper. This avoids Yahoo's per-IP
+rate limiting (HTTP 429) without a paid rotating-proxy service.
 """
 
 import datetime
+import os
+import socket
+import subprocess
+import sys
+import time
 
 import bs4
 import cloudscraper
@@ -24,6 +34,7 @@ use_firefox_headless = True     # run the browser headless (default True)
 
 _scrapper = None                # cached cloudscraper/requests session
 _browser_ctx = None             # cached (playwright, browser, page) tuple
+_proxy_pool = None              # cached ProxyPool (set via init_proxy_pool)
 
 
 __all__ = [
@@ -45,7 +56,231 @@ __all__ = [
     'row_dict_to_csv',
     'df_to_csv',
     'onDay',
+    'ProxyPool',
+    'init_proxy_pool',
+    'next_proxy',
+    'stop_proxy_pool',
 ]
+
+
+# ---------------------------------------------------------------------------
+# Proxy pool — round-robin SOCKS5 over SSH tunnels (ssh -D)
+# Mirrors knowledge_base/src/kb/scrapers/proxy.py. Distributes Yahoo Finance
+# requests across multiple egress IPs to avoid per-IP rate limiting (429).
+# ---------------------------------------------------------------------------
+
+# Local ports are assigned consecutively from this base. 1081+ avoids the
+# common 1080 default so a manually-opened tunnel there isn't clobbered.
+_BASE_PORT = 1081
+# Seconds to wait for each tunnel's SOCKS port to accept connections.
+_READY_TIMEOUT = 12.0
+
+
+class ProxyPool:
+    """A round-robin pool of SSH dynamic-forward (SOCKS5) tunnels.
+
+    Each ``ssh -D <port> -N <host>`` subprocess exposes a local
+    ``socks5://127.0.0.1:<port>`` endpoint whose egress IP is the SSH host's.
+    Used as a context manager so tunnels are torn down when the scrape ends::
+
+        with ProxyPool(["oc1.hevangel.com", "serv00"]) as pool:
+            scraper.run(...)           # calls next_proxy() per request
+
+    The SSH hosts must be resolvable aliases in ``~/.ssh/config`` with key
+    auth (no password prompt).
+    """
+
+    def __init__(self, hosts: list[str], base_port: int = _BASE_PORT) -> None:
+        self.hosts = list(hosts)
+        self.base_port = base_port
+        self._procs: list[tuple[str, int, subprocess.Popen]] = []
+        self._urls: list[str] = []
+        self._idx = 0
+
+    # -- context manager ----------------------------------------------------
+    def __enter__(self) -> "ProxyPool":
+        self.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+    # -- lifecycle ----------------------------------------------------------
+    def start(self) -> list[str]:
+        """Spawn one ``ssh -D`` tunnel per host. Returns the live
+        ``socks5://127.0.0.1:<port>`` URLs (dead tunnels are skipped).
+
+        Each tunnel binds a *free* local port rather than ``base_port+i`` so
+        orphaned ssh processes from a prior run can't cause a silent
+        ``ExitOnForwardFailure`` collision."""
+        for i, host in enumerate(self.hosts):
+            port = self._next_free_port(self.base_port + i)
+            url = f"socks5://127.0.0.1:{port}"
+            try:
+                proc = subprocess.Popen(
+                    ["ssh", "-D", str(port), "-N",
+                     "-o", "ExitOnForwardFailure=yes",
+                     "-o", "ServerAliveInterval=15",
+                     "-o", "ServerAliveCountMax=2",
+                     "-o", "TCPKeepAlive=yes",
+                     "-o", "ConnectTimeout=10",
+                     host],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    **self._popen_kwargs(),
+                )
+            except FileNotFoundError:
+                print('ssh not found on PATH; cannot open proxy tunnels')
+                break
+            if self._wait_ready(port):
+                self._procs.append((host, port, proc))
+                self._urls.append(url)
+                print(f'proxy tunnel up: {host} -> {url} (pid {proc.pid})')
+            else:
+                self._kill_proc(proc)
+                print(f'proxy tunnel FAILED for {host} on port {port} (skipped)')
+        if not self._urls:
+            print('no proxy tunnels came up; requests will go direct')
+        return list(self._urls)
+
+    def stop(self) -> None:
+        """Terminate every tunnel ssh process. Uses a forceful kill on Windows
+        where ``terminate()`` on ssh.exe is unreliable."""
+        for host, port, proc in self._procs:
+            if proc.poll() is None:
+                self._kill_proc(proc)
+                print(f'proxy tunnel down: {host} -> 127.0.0.1:{port}')
+        self._procs.clear()
+        self._urls.clear()
+        self._idx = 0
+
+    # -- round-robin --------------------------------------------------------
+    def next(self) -> str | None:
+        """Return the next live proxy URL in round-robin order, or None if
+        no tunnel is alive (caller connects direct)."""
+        self._reap()
+        if not self._urls:
+            return None
+        url = self._urls[self._idx % len(self._urls)]
+        self._idx += 1
+        return url
+
+    def _reap(self) -> None:
+        """Drop any tunnel whose ssh process has exited."""
+        if not self._procs:
+            return
+        alive: list[tuple[str, int, subprocess.Popen]] = []
+        dead: list[tuple[str, int, subprocess.Popen]] = []
+        for entry in self._procs:
+            (dead if entry[2].poll() is not None else alive).append(entry)
+        if not dead:
+            return
+        for host, port, _ in dead:
+            print(f'proxy tunnel reaped (ssh exited): {host} -> 127.0.0.1:{port}')
+        self._procs = alive
+        self._urls = [f"socks5://127.0.0.1:{port}" for _, port, _ in alive]
+        if self._urls:
+            self._idx %= len(self._urls)
+
+    @property
+    def urls(self) -> list[str]:
+        return list(self._urls)
+
+    # -- helpers ------------------------------------------------------------
+    @staticmethod
+    def _wait_ready(port: int, timeout: float = _READY_TIMEOUT) -> bool:
+        """Poll until the local SOCKS port accepts a connection."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+                    return True
+            except OSError:
+                time.sleep(0.3)
+        return False
+
+    @staticmethod
+    def _next_free_port(preferred: int) -> int:
+        """Return the first free localhost TCP port at or above *preferred*."""
+        for port in range(preferred, preferred + 64):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    @staticmethod
+    def _popen_kwargs() -> dict:
+        """Platform-specific kwargs to keep the tunnel cleanly attached."""
+        if sys.platform == "win32":
+            return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"start_new_session": True}
+
+    @staticmethod
+    def _kill_proc(proc: subprocess.Popen) -> None:
+        """Forcefully terminate an ssh tunnel on every platform."""
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def init_proxy_pool(hosts: list[str] | None = None) -> ProxyPool | None:
+    """Build and start a ProxyPool from a host list or the ``YAHOO_PROXY_HOSTS``
+    env var (comma-separated SSH aliases). Starts the tunnels and caches the
+    pool module-globally so ``next_proxy()`` can cycle through them.
+
+    Returns the pool (or None if no hosts configured). The caller is
+    responsible for calling ``stop_proxy_pool()`` at the end of the scrape.
+    """
+    global _proxy_pool
+    if hosts is None:
+        spec = os.environ.get('YAHOO_PROXY_HOSTS', '')
+        hosts = [h.strip() for h in spec.split(',') if h.strip()]
+    if not hosts:
+        return None
+    if _proxy_pool is not None:
+        _proxy_pool.stop()
+    _proxy_pool = ProxyPool(hosts)
+    _proxy_pool.start()
+    if _proxy_pool.urls:
+        print(f'proxy round-robin across {len(_proxy_pool.urls)} tunnel(s): '
+              + ', '.join(_proxy_pool.urls))
+    else:
+        _proxy_pool = None
+    return _proxy_pool
+
+
+def next_proxy() -> str | None:
+    """Return the next SOCKS5 proxy URL from the module-global pool, or None
+    if no pool is active. Yahoo scrapers call this per-request and pass the
+    result to yfinance/yahooquery's ``proxy=`` kwarg."""
+    if _proxy_pool is None:
+        return None
+    return _proxy_pool.next()
+
+
+def stop_proxy_pool() -> None:
+    """Tear down the module-global proxy pool if one is active."""
+    global _proxy_pool
+    if _proxy_pool is not None:
+        _proxy_pool.stop()
+        _proxy_pool = None
+
+
+def parse_proxy_hosts(spec: str) -> list[str]:
+    """Parse a comma-separated host spec into a clean list of hostnames."""
+    return [h.strip() for h in spec.split(',') if h.strip()]
 
 
 # ---------------------------------------------------------------------------
