@@ -59,6 +59,7 @@ __all__ = [
     'ProxyPool',
     'init_proxy_pool',
     'next_proxy',
+    'next_proxy_session',
     'stop_proxy_pool',
 ]
 
@@ -108,14 +109,18 @@ class ProxyPool:
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> list[str]:
         """Spawn one ``ssh -D`` tunnel per host. Returns the live
-        ``socks5://127.0.0.1:<port>`` URLs (dead tunnels are skipped).
+        ``socks5h://127.0.0.1:<port>`` URLs (dead tunnels are skipped).
+
+        Uses ``socks5h://`` (not ``socks5://``) so DNS resolution happens
+        at the tunnel's egress, not locally — required for requests/urllib
+        to route HTTPS through the proxy correctly.
 
         Each tunnel binds a *free* local port rather than ``base_port+i`` so
-        orphaned ssh processes from a prior run can't cause a silent
+        orphaned ssh processes from a previous run can't cause a silent
         ``ExitOnForwardFailure`` collision."""
         for i, host in enumerate(self.hosts):
             port = self._next_free_port(self.base_port + i)
-            url = f"socks5://127.0.0.1:{port}"
+            url = f"socks5h://127.0.0.1:{port}"
             try:
                 proc = subprocess.Popen(
                     ["ssh", "-D", str(port), "-N",
@@ -177,7 +182,7 @@ class ProxyPool:
         for host, port, _ in dead:
             print(f'proxy tunnel reaped (ssh exited): {host} -> 127.0.0.1:{port}')
         self._procs = alive
-        self._urls = [f"socks5://127.0.0.1:{port}" for _, port, _ in alive]
+        self._urls = [f"socks5h://127.0.0.1:{port}" for _, port, _ in alive]
         if self._urls:
             self._idx %= len(self._urls)
 
@@ -268,6 +273,19 @@ def next_proxy() -> str | None:
     if _proxy_pool is None:
         return None
     return _proxy_pool.next()
+
+
+def next_proxy_session():
+    """Return a ``requests.Session`` routed through the next proxy, or None
+    if no pool is active. Modern yfinance (1.5+) takes ``session=`` rather
+    than ``proxy=``; yahooquery accepts ``proxy=`` directly."""
+    import requests as _requests
+    url = next_proxy()
+    if not url:
+        return None
+    s = _requests.Session()
+    s.proxies.update({"http": url, "https": url})
+    return s
 
 
 def stop_proxy_pool() -> None:

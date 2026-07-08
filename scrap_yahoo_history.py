@@ -8,7 +8,7 @@ import time
 
 import pandas as pd
 import yfinance as yf
-from scrap_utils import init_proxy_pool, next_proxy, stop_proxy_pool
+from scrap_utils import init_proxy_pool, next_proxy_session, stop_proxy_pool
 
 scrap_delay = 2
 
@@ -38,7 +38,7 @@ def main():
             if args.skip is not None and count < args.skip:
                 continue
             print('downloading...' + ticker, '-', count)
-            proxy = next_proxy()
+            session = next_proxy_session()
 
             try:
                 data = yf.download(
@@ -48,12 +48,12 @@ def main():
                     prepost=False,
                     repair=True,
                     threads=True,
-                    proxy=proxy,
+                    session=session,
                 )
             except Exception as exc:
                 print(f'download failed ({exc}), retry after backoff')
                 time.sleep(30)
-                proxy = next_proxy()
+                session = next_proxy_session()
                 data = yf.download(
                     ticker,
                     period='max',
@@ -61,7 +61,7 @@ def main():
                     prepost=False,
                     repair=True,
                     threads=True,
-                    proxy=proxy,
+                    session=session,
                 )
 
             # Modern yfinance returns MultiIndex columns even for a single
@@ -73,12 +73,12 @@ def main():
                 data.columns = data.columns.get_level_values(0)
 
             try:
-                yf_ticker = yf.Ticker(ticker, proxy=proxy)
+                yf_ticker = yf.Ticker(ticker, session=session)
             except Exception as exc:
                 print(f'Ticker get failed ({exc}), retry after backoff')
                 time.sleep(30)
-                proxy = next_proxy()
-                yf_ticker = yf.Ticker(ticker, proxy=proxy)
+                session = next_proxy_session()
+                yf_ticker = yf.Ticker(ticker, session=session)
 
             try:
                 dividends = yf_ticker.dividends

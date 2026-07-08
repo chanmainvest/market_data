@@ -7,7 +7,7 @@ import time
 
 import pandas as pd
 import yfinance as yf
-from scrap_utils import init_proxy_pool, next_proxy, stop_proxy_pool
+from scrap_utils import init_proxy_pool, next_proxy_session, stop_proxy_pool
 
 scrap_delay = 2
 
@@ -81,8 +81,8 @@ def main():
     try:
         for ticker in df_input.index:
             print(ticker)
-            proxy = next_proxy()
-            yf_ticker = yf.Ticker(ticker, proxy=proxy) if proxy else yf.Ticker(ticker)
+            session = next_proxy_session()
+            yf_ticker = yf.Ticker(ticker, session=session) if session else yf.Ticker(ticker)
             try:
                 yf_calendar = yf_ticker.calendar
             except Exception:

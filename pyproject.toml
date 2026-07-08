@@ -5,7 +5,7 @@ description = "Stock market data scrapers + Postgres storage + FastAPI viewer"
 requires-python = ">=3.11"
 dependencies = [
     # HTTP / scraping
-    "requests>=2.32",
+    "requests[socks]>=2.32",
     "cloudscraper>=1.2",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",

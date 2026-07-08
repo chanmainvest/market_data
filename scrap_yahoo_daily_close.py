@@ -85,8 +85,8 @@ def main():
         for count, ticker in enumerate(ticker_list):
             print('downloading...', ticker, '-', count)
             try:
-                proxy = next_proxy()
-                yticker = yq.Ticker(ticker, proxy=proxy) if proxy else yq.Ticker(ticker)
+                session = next_proxy_session()
+                yticker = yq.Ticker(ticker, session=session) if session else yq.Ticker(ticker)
                 ticker_dict = {'Ticker': ticker}
                 for module, module_dict in columns.items():
                     ymodule = getattr(yticker, module, None)
