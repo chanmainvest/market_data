@@ -124,3 +124,9 @@ stock_data_local/
 # Playwright browsers
 .ms-playwright/
 *.tsbuildinfo
+
+# Graphify output
+graphify-out/
+
+# CodeGraph output
+.codegraph
