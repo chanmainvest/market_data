@@ -5,6 +5,8 @@
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- fuzzystrmatch: levenshtein() distance for "did you mean?" ticker suggestions.
+CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
 
 -- ---------------------------------------------------------------------------
 -- Reference tables (regular, no hypertable)

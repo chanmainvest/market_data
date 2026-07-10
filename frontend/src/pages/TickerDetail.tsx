@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import PriceChart from "../components/PriceChart";
@@ -8,6 +8,7 @@ const SOURCES = ["reconciled", "yahoo", "alpha_vantage", "macrotrends"] as const
 
 export default function TickerDetail() {
   const { symbol } = useParams<{ symbol: string }>();
+  const nav = useNavigate();
   const [source, setSource] = useState<(typeof SOURCES)[number]>("reconciled");
 
   const prices = useQuery({
@@ -40,9 +41,23 @@ export default function TickerDetail() {
         )
       : {};
   const hasNoData = rows.length === 0 && !prices.isLoading;
+  const totalAcrossSources = Object.values(sourceAvailability).reduce((a, b) => a + b, 0);
   const alternatives = Object.entries(sourceAvailability)
     .filter(([, n]) => n > 0)
     .map(([k]) => k);
+
+  // "Did you mean?" — only when NO source has data (likely a typo / unknown
+  // ticker). Asks the backend for similar tickers via levenshtein distance.
+  const suggest = useQuery({
+    queryKey: ["suggest", symbol],
+    queryFn: () => api<{ suggestions: { ticker: string; distance: number }[] }>(
+      `/tickers/suggest?q=${symbol}`
+    ),
+    enabled: !!symbol && totalAcrossSources === 0 && !compare.isLoading,
+  });
+  const topSuggestions = (suggest.data?.suggestions ?? [])
+    .filter((s) => s.distance <= 2)
+    .slice(0, 5);
 
   const lines =
     compare.data && Object.keys(compare.data.series).length > 0
@@ -110,9 +125,28 @@ export default function TickerDetail() {
                   </span>
                 ))}
               </p>
-            ) : (
-              <p className="text-sm">No data from any source for this ticker.</p>
-            )}
+            ) : totalAcrossSources === 0 ? (
+              <>
+                <p className="text-sm mb-3">No data from any source for this ticker.</p>
+                {topSuggestions.length > 0 && (
+                  <p className="text-sm">
+                    Did you mean:{" "}
+                    {topSuggestions.map((s, i) => (
+                      <span key={s.ticker}>
+                        {i > 0 && ", "}
+                        <button
+                          onClick={() => nav(`/ticker/${s.ticker}`)}
+                          className="text-blue-600 hover:underline font-medium"
+                        >
+                          {s.ticker}
+                        </button>
+                      </span>
+                    ))}
+                    ?
+                  </p>
+                )}
+              </>
+            ) : null}
           </div>
         ) : (
           <PriceChart ohlc={ohlc} />

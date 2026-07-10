@@ -9,6 +9,35 @@ from ...db import engine
 router = APIRouter()
 
 
+@router.get("/tickers/suggest")
+def suggest_ticker(q: str = Query(..., min_length=1, max_length=20)) -> dict:
+    """Suggest similar tickers via levenshtein distance (fuzzystrmatch).
+
+    Used by the UI for a "Did you mean ...?" hint when a search lands on a
+    ticker that has no data. Draws candidates from the distinct tickers
+    actually present in raw_yahoo_history (the largest raw table), not from
+    the (currently empty) ref_ticker reference table.
+    """
+    needle = q.upper().strip()
+    with engine().connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT ticker, levenshtein(ticker, :q) AS dist
+                FROM (SELECT DISTINCT ticker FROM raw_yahoo_history) t
+                WHERE ticker <> :q
+                ORDER BY dist ASC, ticker
+                LIMIT 8
+                """
+            ),
+            {"q": needle},
+        ).fetchall()
+    return {
+        "query": needle,
+        "suggestions": [{"ticker": r[0], "distance": r[1]} for r in rows],
+    }
+
+
 @router.get("/tickers")
 def list_tickers(
     q: str | None = Query(None, help="Substring search on ticker / description"),
