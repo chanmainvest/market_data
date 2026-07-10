@@ -234,14 +234,21 @@ def _upsert_reconciled(df: pd.DataFrame) -> int:
         records.append(rec)
 
     update_cols = [c for c in df.columns if c not in conflict_cols]
-    stmt = pg_insert(tbl).values(records)
-    if update_cols:
-        set_map = {c: getattr(stmt.excluded, c) for c in update_cols}
-        stmt = stmt.on_conflict_do_update(index_elements=conflict_cols, set_=set_map)
-    else:
-        stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+    # Postgres limits a single statement to 65535 bound parameters. A ticker
+    # with a long history (e.g. AAPL ~11k rows x 16 cols = ~180k params) blows
+    # past that, so chunk the insert. 1000 rows * 16 cols = 16k params, safe.
+    n_cols = len(df.columns)
+    batch_size = max(1, 60_000 // max(n_cols, 1))
     with engine().begin() as conn:
-        conn.execute(stmt)
+        for i in range(0, len(records), batch_size):
+            batch = records[i : i + batch_size]
+            stmt = pg_insert(tbl).values(batch)
+            if update_cols:
+                set_map = {c: getattr(stmt.excluded, c) for c in update_cols}
+                stmt = stmt.on_conflict_do_update(index_elements=conflict_cols, set_=set_map)
+            else:
+                stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+            conn.execute(stmt)
     return len(records)
 
 

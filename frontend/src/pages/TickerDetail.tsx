@@ -12,7 +12,7 @@ export default function TickerDetail() {
 
   const prices = useQuery({
     queryKey: ["prices", symbol, source],
-    queryFn: () => api<{ rows: any[] }>(`/prices/${symbol}?source=${source}`),
+    queryFn: () => api<{ rows: any[]; count: number }>(`/prices/${symbol}?source=${source}`),
     enabled: !!symbol,
   });
   const compare = useQuery({
@@ -25,10 +25,24 @@ export default function TickerDetail() {
 
   if (!symbol) return null;
 
-  const ohlc = (prices.data?.rows ?? []).map((r) => ({
+  const rows = prices.data?.rows ?? [];
+  const ohlc = rows.map((r) => ({
     date: String(r.date),
     open: r.open, high: r.high, low: r.low, close: r.close,
   }));
+
+  // If the selected source has no data, surface which sources do (from the
+  // compare query) so the user isn't staring at a blank chart.
+  const sourceAvailability =
+    compare.data
+      ? Object.fromEntries(
+          Object.entries(compare.data.series).map(([k, v]) => [k, v.length])
+        )
+      : {};
+  const hasNoData = rows.length === 0 && !prices.isLoading;
+  const alternatives = Object.entries(sourceAvailability)
+    .filter(([, n]) => n > 0)
+    .map(([k]) => k);
 
   const lines =
     compare.data && Object.keys(compare.data.series).length > 0
@@ -58,19 +72,51 @@ export default function TickerDetail() {
       <div className="bg-white rounded-lg shadow p-4">
         <div className="flex items-center gap-2 mb-3">
           <span className="text-sm text-slate-500">Source:</span>
-          {SOURCES.map((s) => (
-            <button
-              key={s}
-              onClick={() => setSource(s)}
-              className={`px-3 py-1 rounded text-sm ${
-                source === s ? "bg-slate-900 text-white" : "bg-slate-100 hover:bg-slate-200"
-              }`}
-            >
-              {s}
-            </button>
-          ))}
+          {SOURCES.map((s) => {
+            const n = sourceAvailability[s];
+            return (
+              <button
+                key={s}
+                onClick={() => setSource(s)}
+                className={`px-3 py-1 rounded text-sm ${
+                  source === s ? "bg-slate-900 text-white" : "bg-slate-100 hover:bg-slate-200"
+                }`}
+              >
+                {s}
+                {n != null && (
+                  <span className={`ml-1 text-xs ${n > 0 ? "text-emerald-500" : "text-slate-400"}`}>
+                    {n > 0 ? n.toLocaleString() : "—"}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
-        <PriceChart ohlc={ohlc} />
+        {hasNoData ? (
+          <div className="text-center py-12 text-slate-500">
+            <p className="mb-2">No <code className="text-sm">{source}</code> data for {symbol}.</p>
+            {alternatives.length > 0 ? (
+              <p className="text-sm">
+                Try:{" "}
+                {alternatives.map((a, i) => (
+                  <span key={a}>
+                    {i > 0 && ", "}
+                    <button
+                      onClick={() => setSource(a as (typeof SOURCES)[number])}
+                      className="text-blue-600 hover:underline"
+                    >
+                      {a}
+                    </button>
+                  </span>
+                ))}
+              </p>
+            ) : (
+              <p className="text-sm">No data from any source for this ticker.</p>
+            )}
+          </div>
+        ) : (
+          <PriceChart ohlc={ohlc} />
+        )}
       </div>
 
       <div className="bg-white rounded-lg shadow p-4">

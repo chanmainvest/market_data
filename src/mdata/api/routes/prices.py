@@ -44,9 +44,17 @@ def prices(
         params["end"] = end
     where = " AND ".join(clauses)
 
+    # Take the most recent `limit` rows (ORDER BY date DESC) then re-sort
+    # ascending so the chart renders left-to-right chronologically. Without
+    # the inner DESC a plain `ORDER BY date LIMIT n` returns the *oldest* n
+    # rows — useless for a long-history ticker like AAPL (11k rows).
     with engine().connect() as conn:
         rows = conn.execute(
-            text(f"SELECT * FROM {table} WHERE {where} ORDER BY date LIMIT :limit"),
+            text(
+                f"SELECT * FROM ("
+                f"  SELECT * FROM {table} WHERE {where} ORDER BY date DESC LIMIT :limit"
+                f") recent ORDER BY date"
+            ),
             params,
         ).mappings().all()
     return {"ticker": ticker.upper(), "source": source, "count": len(rows), "rows": [dict(r) for r in rows]}
@@ -87,10 +95,13 @@ def compare(
             ("macrotrends", "raw_macrotrends_history", "close"),
             ("reconciled", "reconcile_price_history", "close"),
         ):
+            # Most recent `limit` rows, re-sorted ascending (see prices()).
             rows = conn.execute(
                 text(
-                    f"SELECT date AS d, {close_col} AS c FROM {table} "
-                    f"WHERE ticker = :t{date_clause} ORDER BY date LIMIT :limit"
+                    f"SELECT d, c FROM ("
+                    f"  SELECT date AS d, {close_col} AS c FROM {table} "
+                    f"  WHERE ticker = :t{date_clause} ORDER BY date DESC LIMIT :limit"
+                    f") recent ORDER BY d"
                 ),
                 params,
             ).fetchall()
