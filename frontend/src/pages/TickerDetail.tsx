@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -27,10 +27,17 @@ export default function TickerDetail() {
   if (!symbol) return null;
 
   const rows = prices.data?.rows ?? [];
-  const ohlc = rows.map((r) => ({
-    date: String(r.date),
-    open: r.open, high: r.high, low: r.low, close: r.close,
-  }));
+  // Memoize so the array identity is stable across re-renders (when the
+  // data hasn't actually changed). Without this the chart's useEffect
+  // fires on every render and churns the chart instance.
+  const ohlc = useMemo(
+    () =>
+      rows.map((r) => ({
+        date: String(r.date),
+        open: r.open, high: r.high, low: r.low, close: r.close,
+      })),
+    [rows]
+  );
 
   // If the selected source has no data, surface which sources do (from the
   // compare query) so the user isn't staring at a blank chart.
